@@ -6,4 +6,3 @@ statistics
 opencv-python
 scipy
 matplotlib
-e
