@@ -1,8 +1,10 @@
+flask
+flask-cors
 keras
 tensorflow
-pandas
-numpy
-statistics
 opencv-python
+numpy
 scipy
+pandas
 matplotlib
+imageio
