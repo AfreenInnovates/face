@@ -9,7 +9,6 @@ import os
 import sys
 from dotenv import load_dotenv
 from openai import OpenAI
-from elevenlabs import ElevenLabs
 
 # Load environment variables
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -42,13 +41,6 @@ nebius_client = OpenAI(
     base_url="https://api.tokenfactory.nebius.com/v1/",
     api_key=os.environ.get("NEBIUS_API_KEY")
 )
-
-eleven_api_key = os.getenv("ELEVEN_API_KEY")
-if eleven_api_key:
-    elevenlabs_client = ElevenLabs(api_key=eleven_api_key)
-else:
-    elevenlabs_client = None
-    print("WARNING: ELEVEN_API_KEY not found. Audio generation will be disabled.")
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -175,28 +167,10 @@ def chat():
         assistant_message = response.choices[0].message.content
         print(f"Got response from Nebius: {assistant_message[:100]}...")
         
-        audio_base64 = None
-        if elevenlabs_client:
-            try:
-                print("Generating audio with ElevenLabs...")
-                # common ElevenLabs voice ID - "21m00Tcm4TlvDq8ikWAM" is Rachel
-                audio = elevenlabs_client.text_to_speech.convert(
-                    voice_id="21m00Tcm4TlvDq8ikWAM",  # Rachel voice ID
-                    text=assistant_message,
-                    model_id="eleven_multilingual_v2"
-                )
-                
-                audio_bytes = b"".join(audio)
-                audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-                print("Audio generated successfully")
-            except Exception as audio_error:
-                print(f"Audio generation error (continuing without audio): {str(audio_error)}")
-        else:
-            print("Skipping audio generation - ElevenLabs client not initialized")
+        # Audio generation logic has been removed
         
         return jsonify({
             'message': assistant_message,
-            'audio': audio_base64,
             'emotion': emotion
         })
     
@@ -208,4 +182,3 @@ def chat():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
-

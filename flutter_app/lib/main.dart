@@ -2,14 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
-import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter_tts/flutter_tts.dart'; // Changed from audioplayers to flutter_tts
 import 'package:path_provider/path_provider.dart';
 
 void main() async {
@@ -100,7 +99,7 @@ class _MainNavigationState extends State<MainNavigation> {
         children: [
           LandingPage(cameras: widget.cameras),
           CameraPage(
-            key: ValueKey('camera_page'),
+            key: const ValueKey('camera_page'),
             cameras: widget.cameras,
             onEmotionDetected: _onEmotionDetected,
           ),
@@ -231,10 +230,7 @@ class _LandingPageState extends State<LandingPage>
 
   Future<void> _requestCameraPermission() async {
     final status = await Permission.camera.request();
-    if (status.isGranted) {
-      // Navigation will be handled by MainNavigation
-      // This is kept for backward compatibility but won't be used
-    } else {
+    if (!status.isGranted) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -931,7 +927,7 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Camera preview - Fixed zoom issue
+          // Camera preview
           Positioned.fill(
             child: Center(
               child: AspectRatio(
@@ -1376,11 +1372,12 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final stt.SpeechToText _speech = stt.SpeechToText();
-  final AudioPlayer _audioPlayer = AudioPlayer();
+  final FlutterTts _flutterTts = FlutterTts();
   final TextEditingController _textController = TextEditingController();
   final List<Map<String, String>> _messages = [];
   bool _isListening = false;
   bool _isLoading = false;
+  bool _isTtsEnabled = true;
   final String _apiUrl = 'http://localhost:5000/chat';
   late AnimationController _pulseController;
   
@@ -1401,11 +1398,21 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 1000),
       vsync: this,
     )..repeat(reverse: true);
+    
     _initializeSpeech();
+    _initializeTts();
+    
     // Send initial greeting
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sendMessage('Hello!', isInitial: true);
     });
+  }
+
+  Future<void> _initializeTts() async {
+    await _flutterTts.setLanguage("en-US");
+    await _flutterTts.setSpeechRate(0.7);
+    await _flutterTts.setVolume(1.0);
+    await _flutterTts.setPitch(1.0);
   }
 
   Future<void> _initializeSpeech() async {
@@ -1433,8 +1440,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       
       if (!available) {
         print('Speech recognition not available - this is normal on some browsers');
-      } else {
-        print('Speech recognition initialized successfully');
       }
     } catch (e) {
       print('Failed to initialize speech recognition: $e');
@@ -1445,38 +1450,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     try {
       // Check if speech recognition is available
       if (!_speech.isAvailable) {
-        bool available = await _speech.initialize(
-          onError: (error) {
-            print('Speech recognition error: $error');
-            if (mounted) {
-              setState(() {
-                _isListening = false;
-              });
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Speech recognition error: ${error.errorMsg}'),
-                  backgroundColor: const Color(0xFFFF6B6B),
-                ),
-              );
-            }
-          },
-          onStatus: (status) {
-            print('Speech recognition status: $status');
-            if (status == 'done' || status == 'notListening') {
-              if (mounted) {
-                setState(() {
-                  _isListening = false;
-                });
-              }
-            }
-          },
-        );
-        
+        bool available = await _speech.initialize();
         if (!available) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                content: Text('Speech recognition not available on this device/browser'),
+                content: Text('Speech recognition not available'),
                 backgroundColor: Color(0xFFFF6B6B),
               ),
             );
@@ -1498,6 +1477,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         }
         return;
       }
+      
+      // Stop TTS if it's talking so we can listen
+      await _flutterTts.stop();
 
       // Start listening
       setState(() {
@@ -1511,16 +1493,20 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
               _textController.text = result.recognizedWords;
             });
             
+            // Auto-send when silence is detected or result is final
             if (result.finalResult) {
               _stopListening();
               if (result.recognizedWords.isNotEmpty) {
-                _sendMessage(result.recognizedWords);
+                // Short delay to let the UI update
+                Future.delayed(const Duration(milliseconds: 300), () {
+                  _sendMessage(result.recognizedWords);
+                });
               }
             }
           }
         },
         listenFor: const Duration(seconds: 30),
-        pauseFor: const Duration(seconds: 5),
+        pauseFor: const Duration(seconds: 3),
         cancelOnError: true,
         listenMode: stt.ListenMode.confirmation,
       );
@@ -1530,12 +1516,6 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         setState(() {
           _isListening = false;
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to start voice input: ${e.toString()}'),
-            backgroundColor: const Color(0xFFFF6B6B),
-          ),
-        );
       }
     }
   }
@@ -1549,6 +1529,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   Future<void> _sendMessage(String message, {bool isInitial = false}) async {
     if (message.trim().isEmpty && !isInitial) return;
+
+    // Stop previous speech if any
+    await _flutterTts.stop();
 
     setState(() {
       if (!isInitial) {
@@ -1578,18 +1561,16 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final assistantMessage = data['message'] as String;
-        final audioBase64 = data['audio'] as String?; // Nullable
 
         setState(() {
           _messages.add({'role': 'assistant', 'content': assistantMessage});
         });
 
-        // Play audio if available
-        if (audioBase64 != null && audioBase64.isNotEmpty) {
-          await _playAudio(audioBase64);
-        } else {
-          print('No audio available in response');
+        // Read out loud if not muted
+        if (_isTtsEnabled) {
+          await _flutterTts.speak(assistantMessage);
         }
+
       } else {
         throw Exception('Failed to get response from server');
       }
@@ -1611,24 +1592,20 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       }
     }
   }
-
-  Future<void> _playAudio(String audioBase64) async {
-    try {
-      final audioBytes = base64Decode(audioBase64);
-      final tempDir = await getTemporaryDirectory();
-      final file = File('${tempDir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.mp3');
-      await file.writeAsBytes(audioBytes);
-      
-      await _audioPlayer.play(DeviceFileSource(file.path));
-    } catch (e) {
-      print('Error playing audio: $e');
+  
+  void _toggleMute() {
+    setState(() {
+      _isTtsEnabled = !_isTtsEnabled;
+    });
+    if (!_isTtsEnabled) {
+      _flutterTts.stop();
     }
   }
 
   @override
   void dispose() {
     _speech.cancel();
-    _audioPlayer.dispose();
+    _flutterTts.stop();
     _textController.dispose();
     _pulseController.dispose();
     super.dispose();
@@ -1660,6 +1637,16 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             ),
           ],
         ),
+        actions: [
+          IconButton(
+            onPressed: _toggleMute,
+            icon: Icon(
+              _isTtsEnabled ? Icons.volume_up : Icons.volume_off,
+              color: _isTtsEnabled ? emotionData.color : Colors.white54,
+            ),
+          ),
+          const SizedBox(width: 8),
+        ],
         centerTitle: false,
       ),
       body: Column(
