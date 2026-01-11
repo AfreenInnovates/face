@@ -8,3 +8,6 @@ scipy
 pandas
 matplotlib
 imageio
+openai
+elevenlabs
+python-dotenv

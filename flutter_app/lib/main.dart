@@ -2,11 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:audioplayers/audioplayers.dart';
+import 'package:path_provider/path_provider.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,7 +59,112 @@ class MyApp extends StatelessWidget {
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF0A0E27),
       ),
-      home: LandingPage(cameras: cameras),
+      home: MainNavigation(cameras: cameras),
+    );
+  }
+}
+
+class MainNavigation extends StatefulWidget {
+  final List<CameraDescription> cameras;
+  
+  const MainNavigation({super.key, required this.cameras});
+
+  @override
+  State<MainNavigation> createState() => _MainNavigationState();
+}
+
+class _MainNavigationState extends State<MainNavigation> {
+  int _currentIndex = 0;
+  String? _detectedEmotion;
+  bool _hasDetectedEmotion = false;
+
+  void _onEmotionDetected(String emotion) {
+    setState(() {
+      _detectedEmotion = emotion;
+      _hasDetectedEmotion = true;
+      _currentIndex = 2; // Navigate to chat
+    });
+  }
+
+  void _onTabChange(int index) {
+    setState(() {
+      _currentIndex = index;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(
+        index: _currentIndex,
+        children: [
+          LandingPage(cameras: widget.cameras),
+          CameraPage(
+            key: ValueKey('camera_page'),
+            cameras: widget.cameras,
+            onEmotionDetected: _onEmotionDetected,
+          ),
+          ChatPage(emotion: _detectedEmotion ?? 'neutral'),
+        ],
+      ),
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF1a1d3a),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.3),
+              blurRadius: 10,
+              offset: const Offset(0, -2),
+            ),
+          ],
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildNavItem(Icons.home, 'Home', 0),
+                _buildNavItem(Icons.camera_alt, 'Detect', 1),
+                _buildNavItem(Icons.chat_bubble, 'Chat', 2),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNavItem(IconData icon, String label, int index) {
+    final isSelected = _currentIndex == index;
+    return GestureDetector(
+      onTap: () => _onTabChange(index),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF4D96FF).withOpacity(0.2) : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              color: isSelected ? const Color(0xFF4D96FF) : Colors.white60,
+              size: 24,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: isSelected ? const Color(0xFF4D96FF) : Colors.white60,
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -123,17 +232,8 @@ class _LandingPageState extends State<LandingPage>
   Future<void> _requestCameraPermission() async {
     final status = await Permission.camera.request();
     if (status.isGranted) {
-      Navigator.push(
-        context,
-        PageRouteBuilder(
-          pageBuilder: (context, animation, secondaryAnimation) =>
-              CameraPage(cameras: widget.cameras),
-          transitionsBuilder: (context, animation, secondaryAnimation, child) {
-            return FadeTransition(opacity: animation, child: child);
-          },
-          transitionDuration: const Duration(milliseconds: 600),
-        ),
-      );
+      // Navigation will be handled by MainNavigation
+      // This is kept for backward compatibility but won't be used
     } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -239,7 +339,7 @@ class _LandingPageState extends State<LandingPage>
     return Column(
       key: const ValueKey('main'),
       children: [
-        const SizedBox(height: 60),
+        const SizedBox(height: 40),
         
         // App title with animation
         TweenAnimationBuilder<double>(
@@ -407,7 +507,7 @@ class _LandingPageState extends State<LandingPage>
           ),
         ),
         
-        const SizedBox(height: 60),
+        const SizedBox(height: 40),
       ],
     );
   }
@@ -582,8 +682,9 @@ class AnimatedBackground extends StatelessWidget {
 
 class CameraPage extends StatefulWidget {
   final List<CameraDescription> cameras;
+  final Function(String)? onEmotionDetected;
 
-  const CameraPage({super.key, required this.cameras});
+  const CameraPage({super.key, required this.cameras, this.onEmotionDetected});
 
   @override
   State<CameraPage> createState() => _CameraPageState();
@@ -602,6 +703,12 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
   late AnimationController _scanController;
   late AnimationController _pulseController;
   bool _faceDetected = false;
+  
+  // Emotion tracking for 5 seconds
+  String? _trackedEmotion;
+  DateTime? _emotionStartTime;
+  bool _emotionFinalized = false;
+  Timer? _emotionTrackingTimer;
   
   final Map<String, EmotionData> _emotionMap = {
     'happy': EmotionData('😊', 'Happy', const Color(0xFFFFD93D)),
@@ -659,17 +766,20 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
     }
   }
 
+  bool _isCapturing = false;
+
   void _startDetection() {
-    _detectionTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
-      if (_controller != null && _controller!.value.isInitialized) {
+    _detectionTimer = Timer.periodic(const Duration(milliseconds: 1000), (timer) {
+      if (_controller != null && _controller!.value.isInitialized && !_isCapturing) {
         _detectEmotion();
       }
     });
   }
 
   Future<void> _detectEmotion() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
+    if (_controller == null || !_controller!.value.isInitialized || _isCapturing || _emotionFinalized) return;
 
+    _isCapturing = true;
     try {
       final XFile image = await _controller!.takePicture();
       final bytes = await image.readAsBytes();
@@ -682,7 +792,7 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
           'image': 'data:image/jpeg;base64,$base64Image',
           'session_id': _sessionId,
         }),
-      ).timeout(const Duration(seconds: 2));
+      ).timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -693,11 +803,38 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
               EmotionData('🎭', emotionKey, const Color(0xFF95A3B3));
           
           if (mounted) {
+            final detectedEmotionKey = emotionKey;
+            
             setState(() {
               _faceDetected = true;
               _currentEmotion = emotionData.name;
               _emotionProbability = face['probability'];
               _emotionColor = emotionData.color;
+              
+              // Track emotion for 5-7 seconds
+              if (_trackedEmotion != detectedEmotionKey) {
+                _trackedEmotion = detectedEmotionKey;
+                _emotionStartTime = DateTime.now();
+                _emotionFinalized = false;
+                _emotionTrackingTimer?.cancel();
+              } else if (_emotionStartTime != null && !_emotionFinalized) {
+                final duration = DateTime.now().difference(_emotionStartTime!);
+                if (duration.inSeconds >= 5) {
+                  _emotionFinalized = true;
+                  // Stop detection
+                  _detectionTimer?.cancel();
+                  // Stop camera
+                  _controller?.dispose();
+                  _controller = null;
+                  
+                  // Show success screen briefly, then navigate
+                  Future.delayed(const Duration(milliseconds: 500), () {
+                    if (widget.onEmotionDetected != null && mounted) {
+                      widget.onEmotionDetected!(detectedEmotionKey);
+                    }
+                  });
+                }
+              }
             });
           }
         } else {
@@ -707,18 +844,27 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
               _currentEmotion = 'No Face Detected';
               _emotionProbability = 0.0;
               _emotionColor = const Color(0xFF95A3B3);
+              _trackedEmotion = null;
+              _emotionStartTime = null;
             });
           }
         }
       }
     } catch (e) {
-      print('Detection error: $e');
+      if (e.toString().contains('Previous capture')) {
+        print('Skipping frame - camera busy');
+      } else {
+        print('Detection error: $e');
+      }
+    } finally {
+      _isCapturing = false;
     }
   }
 
   @override
   void dispose() {
     _detectionTimer?.cancel();
+    _emotionTrackingTimer?.cancel();
     _controller?.dispose();
     _scanController.dispose();
     _pulseController.dispose();
@@ -727,25 +873,44 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    if (!_isInitialized || _controller == null) {
+    // Show success screen if emotion has been finalized
+    if (_emotionFinalized) {
       return Scaffold(
         backgroundColor: const Color(0xFF0A0E27),
         body: Center(
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(
-                width: 60,
-                height: 60,
-                child: CircularProgressIndicator(
-                  strokeWidth: 3,
-                  valueColor: AlwaysStoppedAnimation<Color>(
-                    const Color(0xFF4D96FF).withOpacity(0.8),
-                  ),
+              Icon(Icons.check_circle, size: 80, color: _emotionColor),
+              const SizedBox(height: 24),
+              Text(
+                'Emotion Captured!',
+                style: TextStyle(
+                  color: _emotionColor,
+                  fontSize: 24,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
-              const SizedBox(height: 24),
-              const Text(
+            ],
+          ),
+        ),
+      );
+    }
+    
+    // Show loading screen if camera not initialized
+    if (!_isInitialized || _controller == null) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF0A0E27),
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(
+                strokeWidth: 3,
+                valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF4D96FF)),
+              ),
+              SizedBox(height: 24),
+              Text(
                 'Initializing Camera...',
                 style: TextStyle(
                   color: Colors.white60,
@@ -842,6 +1007,14 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
                 child: AnimatedBuilder(
                   animation: _pulseController,
                   builder: (context, child) {
+                    // Calculate time remaining for emotion tracking
+                    int remainingSeconds = 0;
+                    if (_emotionStartTime != null && _trackedEmotion != null) {
+                      final elapsed = DateTime.now().difference(_emotionStartTime!).inSeconds;
+                      remainingSeconds = 5 - elapsed;
+                      if (remainingSeconds < 0) remainingSeconds = 0;
+                    }
+                    
                     return Transform.scale(
                       scale: _faceDetected ? 1.0 + (_pulseController.value * 0.03) : 1.0,
                       child: Container(
@@ -891,6 +1064,20 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
                             
                             if (_faceDetected) ...[
                               const SizedBox(height: 16),
+                              
+                              // Countdown timer
+                              if (_trackedEmotion != null && remainingSeconds > 0) ...[
+                                Text(
+                                  'Analyzing: ${remainingSeconds}s',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    color: _emotionColor,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 1,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                              ],
                               
                               // Confidence bar
                               Column(
@@ -963,10 +1150,18 @@ class _CameraPageState extends State<CameraPage> with TickerProviderStateMixin {
                       onTap: () => _showInfoDialog(context),
                     ),
                     
-                    // Close button
+                    // Close button - now just returns to navigation
                     _buildControlButton(
                       icon: Icons.close,
-                      onTap: () => Navigator.pop(context),
+                      onTap: () {
+                        // Navigation is handled by MainNavigation
+                        // This button can be used for resetting emotion tracking
+                        setState(() {
+                          _trackedEmotion = null;
+                          _emotionStartTime = null;
+                          _emotionFinalized = false;
+                        });
+                      },
                       isPrimary: true,
                     ),
                     
@@ -1168,4 +1363,532 @@ class EmotionData {
   final Color color;
 
   EmotionData(this.emoji, this.name, this.color);
+}
+
+class ChatPage extends StatefulWidget {
+  final String emotion;
+
+  const ChatPage({super.key, required this.emotion});
+
+  @override
+  State<ChatPage> createState() => _ChatPageState();
+}
+
+class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  final TextEditingController _textController = TextEditingController();
+  final List<Map<String, String>> _messages = [];
+  bool _isListening = false;
+  bool _isLoading = false;
+  final String _apiUrl = 'http://localhost:5000/chat';
+  late AnimationController _pulseController;
+  
+  final Map<String, EmotionData> _emotionMap = {
+    'happy': EmotionData('😊', 'Happy', const Color(0xFFFFD93D)),
+    'sad': EmotionData('😢', 'Sad', const Color(0xFF6BCB77)),
+    'angry': EmotionData('😠', 'Angry', const Color(0xFFFF6B6B)),
+    'surprise': EmotionData('😮', 'Surprised', const Color(0xFF4D96FF)),
+    'fear': EmotionData('😨', 'Fearful', const Color(0xFF9D84B7)),
+    'disgust': EmotionData('😖', 'Disgusted', const Color(0xFFFF8C42)),
+    'neutral': EmotionData('😐', 'Neutral', const Color(0xFF95A3B3)),
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 1000),
+      vsync: this,
+    )..repeat(reverse: true);
+    _initializeSpeech();
+    // Send initial greeting
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _sendMessage('Hello!', isInitial: true);
+    });
+  }
+
+  Future<void> _initializeSpeech() async {
+    try {
+      bool available = await _speech.initialize(
+        onStatus: (status) {
+          print('Speech status: $status');
+          if (status == 'done' || status == 'notListening') {
+            if (mounted) {
+              setState(() {
+                _isListening = false;
+              });
+            }
+          }
+        },
+        onError: (error) {
+          print('Speech recognition error: $error');
+          if (mounted) {
+            setState(() {
+              _isListening = false;
+            });
+          }
+        },
+      );
+      
+      if (!available) {
+        print('Speech recognition not available - this is normal on some browsers');
+      } else {
+        print('Speech recognition initialized successfully');
+      }
+    } catch (e) {
+      print('Failed to initialize speech recognition: $e');
+    }
+  }
+
+  void _startListening() async {
+    try {
+      // Check if speech recognition is available
+      if (!_speech.isAvailable) {
+        bool available = await _speech.initialize(
+          onError: (error) {
+            print('Speech recognition error: $error');
+            if (mounted) {
+              setState(() {
+                _isListening = false;
+              });
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Speech recognition error: ${error.errorMsg}'),
+                  backgroundColor: const Color(0xFFFF6B6B),
+                ),
+              );
+            }
+          },
+          onStatus: (status) {
+            print('Speech recognition status: $status');
+            if (status == 'done' || status == 'notListening') {
+              if (mounted) {
+                setState(() {
+                  _isListening = false;
+                });
+              }
+            }
+          },
+        );
+        
+        if (!available) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Speech recognition not available on this device/browser'),
+                backgroundColor: Color(0xFFFF6B6B),
+              ),
+            );
+          }
+          return;
+        }
+      }
+
+      // Request microphone permission
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Microphone permission is required for voice input'),
+              backgroundColor: Color(0xFFFF6B6B),
+            ),
+          );
+        }
+        return;
+      }
+
+      // Start listening
+      setState(() {
+        _isListening = true;
+      });
+
+      await _speech.listen(
+        onResult: (result) {
+          if (mounted) {
+            setState(() {
+              _textController.text = result.recognizedWords;
+            });
+            
+            if (result.finalResult) {
+              _stopListening();
+              if (result.recognizedWords.isNotEmpty) {
+                _sendMessage(result.recognizedWords);
+              }
+            }
+          }
+        },
+        listenFor: const Duration(seconds: 30),
+        pauseFor: const Duration(seconds: 5),
+        cancelOnError: true,
+        listenMode: stt.ListenMode.confirmation,
+      );
+    } catch (e) {
+      print('Error starting speech recognition: $e');
+      if (mounted) {
+        setState(() {
+          _isListening = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to start voice input: ${e.toString()}'),
+            backgroundColor: const Color(0xFFFF6B6B),
+          ),
+        );
+      }
+    }
+  }
+
+  void _stopListening() {
+    _speech.stop();
+    setState(() {
+      _isListening = false;
+    });
+  }
+
+  Future<void> _sendMessage(String message, {bool isInitial = false}) async {
+    if (message.trim().isEmpty && !isInitial) return;
+
+    setState(() {
+      if (!isInitial) {
+        _messages.add({'role': 'user', 'content': message});
+        _textController.clear();
+      }
+      _isLoading = true;
+    });
+
+    try {
+      // Build conversation history
+      final history = _messages.map((msg) => {
+        'role': msg['role'] ?? 'user',
+        'content': msg['content'] ?? ''
+      }).toList();
+
+      final response = await http.post(
+        Uri.parse(_apiUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'emotion': widget.emotion,
+          'message': isInitial ? 'Hello, I\'m feeling ${widget.emotion}. Can you help me?' : message,
+          'history': history,
+        }),
+      ).timeout(const Duration(seconds: 30));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final assistantMessage = data['message'] as String;
+        final audioBase64 = data['audio'] as String?; // Nullable
+
+        setState(() {
+          _messages.add({'role': 'assistant', 'content': assistantMessage});
+        });
+
+        // Play audio if available
+        if (audioBase64 != null && audioBase64.isNotEmpty) {
+          await _playAudio(audioBase64);
+        } else {
+          print('No audio available in response');
+        }
+      } else {
+        throw Exception('Failed to get response from server');
+      }
+    } catch (e) {
+      print('Error sending message: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${e.toString()}'),
+            backgroundColor: const Color(0xFFFF6B6B),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _playAudio(String audioBase64) async {
+    try {
+      final audioBytes = base64Decode(audioBase64);
+      final tempDir = await getTemporaryDirectory();
+      final file = File('${tempDir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.mp3');
+      await file.writeAsBytes(audioBytes);
+      
+      await _audioPlayer.play(DeviceFileSource(file.path));
+    } catch (e) {
+      print('Error playing audio: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    _speech.cancel();
+    _audioPlayer.dispose();
+    _textController.dispose();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final emotionData = _emotionMap[widget.emotion.toLowerCase()] ?? 
+        EmotionData('😐', 'Neutral', const Color(0xFF95A3B3));
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A0E27),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: Row(
+          children: [
+            Text(
+              emotionData.emoji,
+              style: const TextStyle(fontSize: 24),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              'Emotion Chat',
+              style: TextStyle(
+                color: emotionData.color,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+        centerTitle: false,
+      ),
+      body: Column(
+        children: [
+          // Emotion indicator
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: emotionData.color.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: emotionData.color.withOpacity(0.3),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  'Detected Emotion: ',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 14,
+                  ),
+                ),
+                Text(
+                  emotionData.name.toUpperCase(),
+                  style: TextStyle(
+                    color: emotionData.color,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          
+          // Messages list
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: _messages.length,
+              itemBuilder: (context, index) {
+                final message = _messages[index];
+                final isUser = message['role'] == 'user';
+                return Align(
+                  alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: isUser
+                          ? const Color(0xFF4D96FF).withOpacity(0.2)
+                          : const Color(0xFF1a1d3a),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: isUser
+                            ? const Color(0xFF4D96FF).withOpacity(0.3)
+                            : Colors.white.withOpacity(0.1),
+                        width: 1,
+                      ),
+                    ),
+                    constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.75,
+                    ),
+                    child: Text(
+                      message['content'] ?? '',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          
+          // Loading indicator
+          if (_isLoading)
+            Container(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(emotionData.color),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    'Thinking...',
+                    style: TextStyle(
+                      color: Colors.white60,
+                      fontSize: 14,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          
+          // Input area
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1a1d3a),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.3),
+                  blurRadius: 10,
+                  offset: const Offset(0, -2),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                // Voice button
+                GestureDetector(
+                  onTap: _isLoading ? null : (_isListening ? _stopListening : _startListening),
+                  child: AnimatedBuilder(
+                    animation: _isListening ? _pulseController : const AlwaysStoppedAnimation(0),
+                    builder: (context, child) {
+                      return Transform.scale(
+                        scale: _isListening ? 1.0 + (_pulseController.value * 0.1) : 1.0,
+                        child: Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            color: _isListening
+                                ? const Color(0xFFFF6B6B).withOpacity(0.3)
+                                : const Color(0xFF4D96FF).withOpacity(0.2),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: _isListening
+                                  ? const Color(0xFFFF6B6B)
+                                  : const Color(0xFF4D96FF),
+                              width: 2,
+                            ),
+                          ),
+                          child: Icon(
+                            _isListening ? Icons.mic : Icons.mic_none,
+                            color: _isListening
+                                ? const Color(0xFFFF6B6B)
+                                : const Color(0xFF4D96FF),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                
+                // Text input
+                Expanded(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: _isListening 
+                          ? Colors.white.withOpacity(0.05)
+                          : Colors.white.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                        color: Colors.white.withOpacity(0.2),
+                        width: 1,
+                      ),
+                    ),
+                    child: TextField(
+                      controller: _textController,
+                      enabled: !_isListening && !_isLoading,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: InputDecoration(
+                        hintText: _isListening 
+                            ? 'Listening...' 
+                            : 'Type or speak your message...',
+                        hintStyle: TextStyle(
+                          color: _isListening 
+                              ? const Color(0xFFFF6B6B)
+                              : Colors.white54,
+                        ),
+                        border: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 12,
+                        ),
+                      ),
+                      onSubmitted: (text) {
+                        if (text.trim().isNotEmpty && !_isLoading) {
+                          _sendMessage(text);
+                        }
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                
+                // Send button
+                GestureDetector(
+                  onTap: () {
+                    if (_textController.text.trim().isNotEmpty && !_isLoading && !_isListening) {
+                      _sendMessage(_textController.text);
+                    }
+                  },
+                  child: Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: emotionData.color.withOpacity(0.2),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: emotionData.color,
+                        width: 2,
+                      ),
+                    ),
+                    child: Icon(
+                      Icons.send,
+                      color: emotionData.color,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
